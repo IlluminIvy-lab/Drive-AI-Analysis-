@@ -225,4 +225,174 @@ Summary: In Q3, client deliverables were completed across departments.`,
       expect(match.requiresManualReview).toBe(true);
     }
   });
+
+  it('keeps divergent client files (e.g. Priya onboarding vs Plain onboarding) out of trash proposals', () => {
+    const plainOnboarding: DriveFileItem = {
+      id: 'file-05',
+      name: '05_Client-Onboarding-Plain.txt',
+      mimeType: 'text/plain',
+      size: 1500,
+      content: `Standard Client Onboarding Guide
+1. Create account
+2. Verify domain
+3. Set up SSO integration
+General template for all clients.`,
+      contentStatus: 'extracted',
+      extractedWordCount: 22,
+      modifiedTime: '2025-01-01T12:00:00Z',
+    };
+
+    const priyaOnboarding: DriveFileItem = {
+      id: 'file-12',
+      name: '12_Client-Onboarding-Priya.md',
+      mimeType: 'text/markdown',
+      size: 1800,
+      content: `Client Onboarding: Priya Patel
+1. Create account (Custom tier)
+2. Verify domain (acme.priya.io)
+3. Custom security audit and compliance setup.
+Client-specific notes and requirements.`,
+      contentStatus: 'extracted',
+      extractedWordCount: 25,
+      modifiedTime: '2025-01-05T15:00:00Z',
+    };
+
+    const result = analyzeDuplicates([plainOnboarding, priyaOnboarding]);
+
+    // Neither file should ever be proposed for trash in actionableMatches!
+    expect(result.actionableMatches.some(m => m.targetFile.id === priyaOnboarding.id)).toBe(false);
+    expect(result.actionableMatches.some(m => m.targetFile.id === plainOnboarding.id)).toBe(false);
+
+    // If matched due to similarity, it must be flagged as uncertain (manual review)
+    if (result.uncertainMatches.length > 0) {
+      const u = result.uncertainMatches[0];
+      expect(u.isUncertain).toBe(true);
+      expect(u.requiresManualReview).toBe(true);
+      expect(u.deletionEligible).toBe(false);
+    }
+  });
+
+  it('keeps weekly marketing updates without explicit superseding statements out of trash', () => {
+    const weeklyMarketing: DriveFileItem = {
+      id: 'file-14',
+      name: '14_Weekly-Update-Marketing.md',
+      mimeType: 'text/markdown',
+      size: 2100,
+      content: `# Weekly Marketing Update - Week 14
+Key metrics:
+- Lead volume up 12%
+- Campaign A CTR: 3.4%
+- Campaign B spend: $4,200`,
+      contentStatus: 'extracted',
+      extractedWordCount: 28,
+      modifiedTime: '2025-01-14T10:00:00Z',
+    };
+
+    const weeklyGeneral: DriveFileItem = {
+      id: 'file-10',
+      name: '10_Weekly-Update-Company.md',
+      mimeType: 'text/markdown',
+      size: 2300,
+      content: `# Company Weekly Update - Week 14
+Highlights:
+- Engineering shipped v2.1
+- Marketing reports lead volume up 12%
+- Sales closed 4 enterprise deals`,
+      contentStatus: 'extracted',
+      extractedWordCount: 32,
+      modifiedTime: '2025-01-14T10:04:00Z',
+    };
+
+    const result = analyzeDuplicates([weeklyMarketing, weeklyGeneral]);
+
+    // Neither file should be proposed for trash
+    expect(result.actionableMatches.some(m => m.targetFile.id === weeklyMarketing.id)).toBe(false);
+    expect(result.actionableMatches.some(m => m.targetFile.id === weeklyGeneral.id)).toBe(false);
+  });
+
+  it('enforces that total files reviewed reconciles with trash, uncertain, and unique counts', () => {
+    const fileA: DriveFileItem = {
+      id: 'a',
+      name: 'Doc_A.txt',
+      mimeType: 'text/plain',
+      size: 100,
+      content: 'Exact identical text',
+      contentStatus: 'extracted',
+      modifiedTime: '2025-01-01T10:00:00Z',
+    };
+    const fileB: DriveFileItem = {
+      id: 'b',
+      name: 'Doc_A_copy.txt',
+      mimeType: 'text/plain',
+      size: 100,
+      content: 'Exact identical text',
+      contentStatus: 'extracted',
+      modifiedTime: '2025-01-01T10:01:00Z',
+    };
+    const fileC: DriveFileItem = {
+      id: 'c',
+      name: 'Draft_Proposal.txt',
+      mimeType: 'text/plain',
+      size: 300,
+      content: 'Proposal draft with some notes and initial outline.',
+      contentStatus: 'extracted',
+      modifiedTime: '2025-01-02T10:00:00Z',
+    };
+    const fileD: DriveFileItem = {
+      id: 'd',
+      name: 'Draft_Proposal_Revised.txt',
+      mimeType: 'text/plain',
+      size: 350,
+      content: 'Proposal draft revised with additional notes and budget.',
+      contentStatus: 'extracted',
+      modifiedTime: '2025-01-03T10:00:00Z',
+    };
+    const fileE: DriveFileItem = {
+      id: 'e',
+      name: 'Completely_Unique_Doc.txt',
+      mimeType: 'text/plain',
+      size: 500,
+      content: 'Completely unique and independent content for the archives.',
+      contentStatus: 'extracted',
+      modifiedTime: '2025-01-04T10:00:00Z',
+    };
+
+    const allFiles = [fileA, fileB, fileC, fileD, fileE];
+    const result = analyzeDuplicates(allFiles);
+
+    // 1. Check mutual exclusivity: no file in actionableMatches targetFile is in uncertain or unique
+    const actionableTargetIds = new Set(result.actionableMatches.map(m => m.targetFile.id));
+    const uncertainTargetIds = new Set(result.uncertainMatches.map(m => m.targetFile.id));
+    const uniqueIds = new Set(result.uniqueFiles.map(f => f.id));
+
+    // Intersection of actionable and uncertain should be empty
+    for (const id of actionableTargetIds) {
+      expect(uncertainTargetIds.has(id)).toBe(false);
+      expect(uniqueIds.has(id)).toBe(false);
+    }
+
+    // Intersection of uncertain and unique should be empty
+    for (const id of uncertainTargetIds) {
+      expect(uniqueIds.has(id)).toBe(false);
+    }
+
+    // 2. All actionableMatches must be strictly deletion-eligible and NOT uncertain
+    for (const m of result.actionableMatches) {
+      expect(m.deletionEligible).toBe(true);
+      expect(m.isUncertain).toBe(false);
+      expect(m.requiresManualReview).toBe(false);
+      expect(m.signalUsed).not.toBe('none');
+    }
+
+    // 3. All uncertainMatches must be marked uncertain / manual review and NOT deletion eligible
+    for (const u of result.uncertainMatches) {
+      expect(u.isUncertain).toBe(true);
+      expect(u.requiresManualReview).toBe(true);
+      expect(u.deletionEligible).toBe(false);
+    }
+
+    // 4. Exact sum reconciliation: total reviewed = actionable + uncertain + unique
+    const totalPartitioned = actionableTargetIds.size + uncertainTargetIds.size + uniqueIds.size;
+    expect(totalPartitioned).toBe(allFiles.length);
+  });
 });

@@ -27,6 +27,8 @@ export interface GateValidationResult {
     | 'NOT_DELETION_ELIGIBLE'
     | 'PROBABLE_CANDIDATE'
     | 'UNCERTAIN_MATCH'
+    | 'NO_RELIABLE_SIGNAL'
+    | 'METADATA_TIMESTAMP_ONLY'
     | 'SIZE_AND_NAME_ONLY'
     | 'UNREADABLE_FILE'
     | 'DIVERGENT_CONTENT'
@@ -71,10 +73,32 @@ export function isDeletionEligible(match: DuplicateMatch): boolean {
  */
 export function isMatchSelectable(match: DuplicateMatch): boolean {
   if (!match) return false;
+  if (match.isUncertain || match.requiresManualReview) {
+    return false;
+  }
   if (match.type === 'probable-candidate' || match.type === 'requiresManualReview') {
     return false;
   }
   if (match.deletionEligible === false) {
+    return false;
+  }
+  if (
+    match.hasSignificantDivergence ||
+    match.divergenceInfo?.hasSignificantDivergence ||
+    match.divergenceInfo?.warningLevel === 'high'
+  ) {
+    return false;
+  }
+  if (match.signalUsed === 'none' || match.reason?.includes('Signal used: None')) {
+    return false;
+  }
+  // Drafts / near-duplicates require an explicit content statement; metadata/timestamps alone cannot justify selection
+  if (
+    match.type !== 'exact' &&
+    match.type !== 'byte-exact' &&
+    match.type !== 'content-exact' &&
+    match.signalUsed !== 'content_statement'
+  ) {
     return false;
   }
   if (
@@ -169,7 +193,7 @@ export function evaluateTrashEligibility(match: DuplicateMatch): GateValidationR
     };
   }
 
-  // 4. Probable candidate check
+  // 5. Probable candidate check
   if (match.type === 'probable-candidate') {
     return {
       allowed: false,
@@ -179,7 +203,7 @@ export function evaluateTrashEligibility(match: DuplicateMatch): GateValidationR
     };
   }
 
-  // 5. Requires manual review / uncertain check
+  // 6. Requires manual review / uncertain check
   if (match.type === 'requiresManualReview' || match.isUncertain || match.requiresManualReview) {
     return {
       allowed: false,
@@ -189,7 +213,17 @@ export function evaluateTrashEligibility(match: DuplicateMatch): GateValidationR
     };
   }
 
-  // 6. Filename and size alone CANNOT become cleanup-eligible
+  // 7. No reliable decision signal check
+  if (match.signalUsed === 'none' || match.reason?.includes('Signal used: None')) {
+    return {
+      allowed: false,
+      valid: false,
+      reason: `No reliable decision signal available (${match.uncertaintyReason || 'signal: none'}). Cannot be trashed.`,
+      rejectionCode: 'NO_RELIABLE_SIGNAL',
+    };
+  }
+
+  // 8. Filename and size alone CANNOT become cleanup-eligible
   if (match.comparisonMethod === 'size_and_name_match' || match.comparisonMethod === 'metadata_only') {
     return {
       allowed: false,
@@ -199,7 +233,22 @@ export function evaluateTrashEligibility(match: DuplicateMatch): GateValidationR
     };
   }
 
-  // 7. Unreadable content check
+  // 9. Drafts / near-duplicates: Similarity and timestamps alone cannot justify trashing (must have explicit content statement)
+  if (
+    match.type !== 'exact' &&
+    match.type !== 'byte-exact' &&
+    match.type !== 'content-exact' &&
+    match.signalUsed !== 'content_statement'
+  ) {
+    return {
+      allowed: false,
+      valid: false,
+      reason: `Metadata/timestamp-only evidence cannot justify trashing older drafts without an explicit content statement or verified content signal.`,
+      rejectionCode: 'METADATA_TIMESTAMP_ONLY',
+    };
+  }
+
+  // 10. Unreadable content check
   if (
     match.targetFile.contentStatus === 'unavailable' &&
     match.comparisonMethod !== 'binary_checksum_match'

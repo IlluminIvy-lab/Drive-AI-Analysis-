@@ -590,36 +590,81 @@ export default function App() {
     const isProtectedKeyFile = (fileName?: string) =>
       /^(?:00_)?readme\.txt$/i.test(fileName?.trim() || '');
 
-    const validActionable = actionableMatches.filter(
-      (m) => !isProtectedKeyFile(m.targetFile?.name) && !isProtectedKeyFile(m.originalFile?.name)
+    // 1. Identify legitimate proposed trash matches:
+    // Must pass canSafelyTrashMatch (and not be uncertain, manual review, signal none, divergent, or protected)
+    const validProposedMatches = actionableMatches.filter(
+      (m) =>
+        !isProtectedKeyFile(m.targetFile?.name) &&
+        !isProtectedKeyFile(m.originalFile?.name) &&
+        !m.isUncertain &&
+        !m.requiresManualReview &&
+        !m.hasSignificantDivergence &&
+        m.deletionEligible !== false &&
+        m.signalUsed !== 'none' &&
+        (m.type === 'exact' ||
+          m.type === 'byte-exact' ||
+          m.type === 'content-exact' ||
+          m.signalUsed === 'content_statement') &&
+        evaluateTrashEligibility(m).allowed
     );
-    const validUnique = uniqueFiles.filter((f) => !isProtectedKeyFile(f?.name));
-    const validUncertain = uncertainMatches.filter(
-      (u) => !isProtectedKeyFile(u.fileB?.name) && !isProtectedKeyFile(u.fileA?.name)
+
+    const proposedTrashFileIds = new Set(validProposedMatches.map((m) => m.targetFile.id));
+
+    // 2. Identify uncertain review items:
+    // Collect all uncertain matches and ensure no proposed-trash files leak in
+    const deduplicatedUncertain: DuplicateMatch[] = [];
+    const uncertainFileIds = new Set<string>();
+    for (const u of uncertainMatches) {
+      const targetId = u.targetFile?.id;
+      if (
+        targetId &&
+        !proposedTrashFileIds.has(targetId) &&
+        !uncertainFileIds.has(targetId) &&
+        !isProtectedKeyFile(u.targetFile?.name)
+      ) {
+        uncertainFileIds.add(targetId);
+        deduplicatedUncertain.push(u);
+      }
+    }
+
+    // 3. Identify unique / latest kept files:
+    // Scanned files that are NEITHER in proposedTrashFileIds NOR in uncertainFileIds (and not protected)
+    const validUnique = scannedFiles.filter(
+      (f) =>
+        !isProtectedKeyFile(f.name) &&
+        !proposedTrashFileIds.has(f.id) &&
+        !uncertainFileIds.has(f.id)
     );
+
+    const totalFilesReviewed = scannedFiles.filter((f) => !isProtectedKeyFile(f.name)).length;
 
     return {
       timestamp: new Date().toISOString(),
       folderName,
       isProposedReport: true,
-      totalFilesReviewed: scannedFiles.filter((f) => !isProtectedKeyFile(f.name)).length,
-      totalExactDuplicates: validActionable.filter((m) => m.type === 'exact').length,
-      totalVersionDrafts: validActionable.filter((m) => m.type !== 'exact').length,
+      totalFilesReviewed,
+      totalExactDuplicates: validProposedMatches.filter(
+        (m) => m.type === 'exact' || m.type === 'byte-exact' || m.type === 'content-exact'
+      ).length,
+      totalVersionDrafts: validProposedMatches.filter(
+        (m) => m.type !== 'exact' && m.type !== 'byte-exact' && m.type !== 'content-exact'
+      ).length,
       totalTrashed: 0,
       totalUniqueKept: validUnique.length,
       scanDurationMs,
       metrics: scanMetrics || undefined,
-      trashedFiles: validActionable.map((m) => ({
+      trashedFiles: validProposedMatches.map((m) => ({
         trashedFile: m.targetFile,
         keptOriginalFile: m.originalFile,
         type: m.type,
         reason: m.reason,
+        signalUsed: m.signalUsed,
         similarity: m.similarityScore,
         comparisonMethod: m.comparisonMethod,
         trashedSuccess: false,
         isProposed: true,
       })),
-      uncertainFiles: validUncertain.map((m) => ({
+      uncertainFiles: deduplicatedUncertain.map((m) => ({
         fileA: m.originalFile,
         fileB: m.targetFile,
         reason: m.reason,
@@ -751,18 +796,32 @@ export default function App() {
     // Any target file attempted for trash must not appear in uncertain or kept
     const attemptedTargetIds = new Set(trashedResults.map((r) => r.trashedFile.id));
 
-    const deduplicatedUncertain = uncertainMatches
-      .filter((m) => !attemptedTargetIds.has(m.targetFile.id) && !isProtectedKeyFile(m.targetFile?.name))
-      .map((m) => ({
-        fileA: m.originalFile,
-        fileB: m.targetFile,
-        reason: m.reason,
-        similarity: m.similarityScore,
-        comparisonMethod: m.comparisonMethod,
-      }));
+    const deduplicatedUncertain: CleanupReport['uncertainFiles'] = [];
+    const uncertainFileIds = new Set<string>();
+    for (const m of uncertainMatches) {
+      const targetId = m.targetFile?.id;
+      if (
+        targetId &&
+        !attemptedTargetIds.has(targetId) &&
+        !uncertainFileIds.has(targetId) &&
+        !isProtectedKeyFile(m.targetFile?.name)
+      ) {
+        uncertainFileIds.add(targetId);
+        deduplicatedUncertain.push({
+          fileA: m.originalFile,
+          fileB: m.targetFile,
+          reason: m.reason,
+          similarity: m.similarityScore,
+          comparisonMethod: m.comparisonMethod,
+        });
+      }
+    }
 
-    const deduplicatedKept = uniqueFiles.filter(
-      (f) => !attemptedTargetIds.has(f.id) && !isProtectedKeyFile(f.name)
+    const deduplicatedKept = scannedFiles.filter(
+      (f) =>
+        !isProtectedKeyFile(f.name) &&
+        !attemptedTargetIds.has(f.id) &&
+        !uncertainFileIds.has(f.id)
     );
 
     const generatedReport: CleanupReport = {

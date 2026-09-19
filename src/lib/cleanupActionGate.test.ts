@@ -251,6 +251,30 @@ describe('cleanupActionGate - Strict Safety & Deletion Validation', () => {
     expect(autoSelected).toHaveLength(0);
   });
 
+  it('strictly prevents uncertain or manual-review matches from being selectable or trashed', () => {
+    const uncertainMatch: DuplicateMatch = {
+      id: 'm-uncertain-divergent',
+      originalFile: mockBaseFile,
+      targetFile: mockTargetFile,
+      type: 'near-duplicate',
+      confidence: 0.6,
+      reason: 'Low confidence near-duplicate with divergent content',
+      similarityScore: 0.65,
+      signalUsed: 'none',
+      comparisonMethod: 'text_similarity',
+      isUncertain: true,
+      deletionEligible: false,
+      requiresManualReview: true,
+      hasSignificantDivergence: true,
+    };
+
+    expect(isMatchSelectable(uncertainMatch)).toBe(false);
+    expect(canSafelyTrashMatch(uncertainMatch, true)).toBe(false);
+    expect(filterEligibleMatchesForTrash([uncertainMatch], true).approvedMatches).toHaveLength(0);
+    expect(filterEligibleMatchesForTrash([uncertainMatch], true).rejectedMatches).toHaveLength(1);
+    expect(() => assertCanTrash(uncertainMatch, true)).toThrow();
+  });
+
   it('unreadable candidate cannot be selected in the UI or by auto-select', () => {
     const unreadableCandidate: DuplicateMatch = {
       id: 'm-unreadable',

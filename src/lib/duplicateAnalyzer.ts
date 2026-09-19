@@ -649,10 +649,10 @@ export function decideNewerVersion(
       exactReason = `Content-identical document verified by canonical text content. ${nameReason}`;
     } else if (fileA.contentHash && fileA.contentHash === fileB.contentHash) {
       exactSignal = 'sha256_checksum';
-      exactReason = `Exact byte-identical binary file (${formatBytes(fileA.size)}). ${nameReason}`;
+      exactReason = `Exact byte-identical binary file (${formatBytes(fileA.size)}). SHA-256 verified. ${nameReason}`;
     } else if (fileA.md5Checksum && fileA.md5Checksum === fileB.md5Checksum) {
       exactSignal = 'md5_checksum';
-      exactReason = `Exact byte-identical binary file (${formatBytes(fileA.size)}). ${nameReason}`;
+      exactReason = `Exact byte-identical binary file (${formatBytes(fileA.size)}). MD5 checksum verified. ${nameReason}`;
     } else {
       exactReason = `Exact match. ${nameReason}`;
     }
@@ -667,44 +667,26 @@ export function decideNewerVersion(
   }
 
   // Rule b & c for NEAR-DUPLICATES / DRAFT VERSIONS:
-  // Fall back to timestamp, but check if within same few minutes (5 minutes threshold)
+  // Safety rule: Similarity and modified timestamps alone CANNOT justify trashing older drafts.
+  // Older-draft cleanup requires a reliable explicit content statement or another verified safety signal.
+  // Without an explicit content statement, flag as uncertain for manual human review!
   const timeA = new Date(fileA.modifiedTime).getTime();
   const timeB = new Date(fileB.modifiedTime).getTime();
   const timeDiffMs = Math.abs(timeA - timeB);
-  const fiveMinutesMs = 5 * 60 * 1000;
-
-  if (timeDiffMs <= fiveMinutesMs) {
-    // Both files were modified within 5 minutes of each other and no content signal exists!
-    // Rule c: Treat timestamp as unreliable and require a content-based signal before acting — if none exists, flag as uncertain!
-    const diffSec = Math.round(timeDiffMs / 1000);
-    const timePhrase = diffSec < 60 ? `${diffSec} seconds` : `${Math.round(diffSec / 60)} minutes`;
-    return {
-      keeper: fileA, // placeholder, not trashed
-      olderOrDuplicate: fileB,
-      signalUsed: 'none',
-      isUncertain: true,
-      reason: `Signal used: None (Uncertain). Files "${fileA.name}" and "${fileB.name}" were modified within ${timePhrase} of each other (within 5 minutes). Timestamps are treated as unreliable and no explicit content signal (e.g. "draft", "final", "v1/v2", "supersedes") was found.`,
-      uncertaintyReason: `Modified within ${timePhrase} of each other. Under safety rules, timestamps within 5 minutes are unreliable without a content statement. Flagged as uncertain to prevent accidental deletion.`,
-    };
-  }
-
-  // Timestamps are more than 5 minutes apart and no content signal was found:
-  // Fall back to modified timestamp (respecting keeperPref if 'older')
-  const aIsNewer = timeA > timeB;
-  const isKeeperA = keeperPref === 'older' ? !aIsNewer : aIsNewer;
-  const keeper = isKeeperA ? fileA : fileB;
-  const older = isKeeperA ? fileB : fileA;
   const minutesApart = Math.round(timeDiffMs / (1000 * 60));
-  const timeFormatted = minutesApart > 120 
+  const timeFormatted = minutesApart < 5
+    ? `${Math.round(timeDiffMs / 1000)} seconds`
+    : minutesApart > 120 
     ? `${Math.round(minutesApart / 60)} hours`
     : `${minutesApart} minutes`;
 
   return {
-    keeper,
-    olderOrDuplicate: older,
-    signalUsed: 'modified_timestamp',
-    reason: `Signal used: Modified timestamp. No explicit version statement in content. "${keeper.name}" was modified on ${new Date(keeper.modifiedTime).toLocaleString()} vs "${older.name}" on ${new Date(older.modifiedTime).toLocaleString()} (${timeFormatted} apart).`,
-    isUncertain: false,
+    keeper: fileA,
+    olderOrDuplicate: fileB,
+    signalUsed: 'none',
+    isUncertain: true,
+    reason: `Signal used: None (Uncertain). Files "${fileA.name}" and "${fileB.name}" were modified ${timeFormatted} apart, but no explicit content statement (e.g. "draft", "final", "v1/v2", "supersedes") was found. Under safety policy, similarity and modified timestamps alone cannot justify trashing. Manual review required.`,
+    uncertaintyReason: `No explicit content statement found. Similarity and modified timestamps alone are insufficient to justify trashing without human review.`,
   };
 }
 
@@ -886,43 +868,60 @@ export function analyzeDuplicates(
         let assignedType: DuplicateType = 'exact';
         let signalUsed: 'canonical_export' | 'content_hash' | 'content_statement' | 'modified_timestamp' | 'size_and_name' | 'md5_checksum' | 'sha256_checksum' = 'size_and_name';
 
-        if (isGDoc) {
+        if (isValidHash(keeper.contentHash, keeperSizeNum) && keeper.contentHash === other.contentHash) {
+          assignedType = isBothExtracted ? 'content-exact' : 'byte-exact';
+          signalUsed = 'sha256_checksum';
+          detailedReason = `Exact ${isBothExtracted ? 'content-identical document' : 'byte-identical binary file (' + formatBytes(keeper.size) + ')'}. SHA-256 verified. ${nameReason}`;
+        } else if (isGDoc) {
           // Google Docs exports are NEVER byte-exact; they are content-exact
           assignedType = 'content-exact';
           signalUsed = 'canonical_export';
           detailedReason = `Content-exact duplicate Google Workspace document verified by canonical export text. ${nameReason}`;
+        } else if (isValidHash(keeper.md5Checksum, keeperSizeNum) && keeper.md5Checksum === other.md5Checksum) {
+          assignedType = isBothExtracted ? 'content-exact' : 'byte-exact';
+          signalUsed = 'md5_checksum';
+          detailedReason = `Exact ${isBothExtracted ? 'content-identical document' : 'byte-identical binary file (' + formatBytes(keeper.size) + ')'}. MD5 checksum verified. ${nameReason}`;
         } else if (isBothExtracted) {
           assignedType = 'content-exact';
           signalUsed = 'content_hash';
-          detailedReason = `Exact content-identical document verified by canonical text content (${hashVerification || 'text verified'}). ${nameReason}`;
-        } else if (isValidHash(keeper.contentHash, keeperSizeNum) && keeper.contentHash === other.contentHash) {
-          assignedType = 'byte-exact';
-          signalUsed = 'sha256_checksum';
-          detailedReason = `Exact byte-identical binary file (${formatBytes(keeper.size)}). Verified by SHA-256 verified checksum; content is binary and could not be compared as text. ${nameReason}`;
-        } else if (isValidHash(keeper.md5Checksum, keeperSizeNum) && keeper.md5Checksum === other.md5Checksum) {
-          assignedType = 'byte-exact';
-          signalUsed = 'md5_checksum';
-          detailedReason = `Exact byte-identical binary file (${formatBytes(keeper.size)}). Verified by MD5 checksum verified; content is binary and could not be compared as text. ${nameReason}`;
+          detailedReason = `Exact content-identical document verified by canonical text content. ${nameReason}`;
         } else {
-          assignedType = 'exact';
+          assignedType = 'probable-candidate';
           signalUsed = 'size_and_name';
-          detailedReason = `Exact match by size and name. ${nameReason}`;
+          detailedReason = `Probable candidate by size and name without verified content. Requires manual review. ${nameReason}`;
         }
 
-        actionableMatches.push({
-          id: `exact-${keeper.id}-${other.id}`,
-          type: assignedType,
-          confidence: 1.0,
-          reason: detailedReason,
-          signalUsed,
-          comparisonMethod,
-          originalFile: keeper,
-          targetFile: other,
-          similarityScore: 1.0,
-          isUncertain: false,
-          deletionEligible: true,
-          requiresManualReview: false,
-        });
+        if (assignedType === 'probable-candidate') {
+          uncertainMatches.push({
+            id: `exact-${keeper.id}-${other.id}`,
+            type: assignedType,
+            confidence: 0.6,
+            reason: detailedReason,
+            signalUsed,
+            comparisonMethod: 'size_and_name_match',
+            originalFile: keeper,
+            targetFile: other,
+            similarityScore: 1.0,
+            isUncertain: true,
+            deletionEligible: false,
+            requiresManualReview: true,
+          });
+        } else {
+          actionableMatches.push({
+            id: `exact-${keeper.id}-${other.id}`,
+            type: assignedType,
+            confidence: 1.0,
+            reason: detailedReason,
+            signalUsed,
+            comparisonMethod,
+            originalFile: keeper,
+            targetFile: other,
+            similarityScore: 1.0,
+            isUncertain: false,
+            deletionEligible: true,
+            requiresManualReview: false,
+          });
+        }
       }
     }
   };
@@ -992,7 +991,7 @@ export function analyzeDuplicates(
           uncertaintyReason: 'Matched by filename and size alone without verified content. Safety rules prohibit auto-cleanup.',
         };
 
-        actionableMatches.push(candidateMatch);
+        // Probable candidates require manual review and must not be actionable
         uncertainMatches.push(candidateMatch);
         break;
       }
@@ -1049,10 +1048,11 @@ export function analyzeDuplicates(
               targetFile: fileB,
               similarityScore: 0,
               isUncertain: true,
+              deletionEligible: false,
+              requiresManualReview: true,
               hasSignificantDivergence: true,
               uncertaintyReason: `Content is unavailable or not extractable (e.g. scanned PDF, image, archive, or unreadable format). Safety rules prohibit auto-resolving without verified readable content.`,
             };
-            actionableMatches.push(unreadableMatch);
             uncertainMatches.push(unreadableMatch);
             pass2ResolvedIds.add(fileA.id);
             pass2ResolvedIds.add(fileB.id);
@@ -1090,12 +1090,14 @@ export function analyzeDuplicates(
         }
 
         // The documents ARE confirmed to be substantively about the same subject matter!
-        // Now evaluate version seniority (content signal or timestamp determines DIRECTION):
+        // Now evaluate version seniority (explicit content statement required under safety policy):
         const decision = decideNewerVersion(fileA, fileB, 'near-duplicate', options?.preferences);
         const simPercent = Math.round(contentSim * 100);
         const textComparedReason = `Compared real text content: ${simPercent}% content similarity. ${decision.reason}`;
 
-        if (decision.isUncertain) {
+        // Safety rules: Older-draft cleanup requires a reliable explicit content statement.
+        // If no explicit content statement is present, flag as uncertain for manual review.
+        if (decision.isUncertain || decision.signalUsed !== 'content_statement') {
           const uncertainMatch: DuplicateMatch = {
             id: `uncertain-version-${fileA.id}-${fileB.id}`,
             type: 'near-duplicate',
@@ -1107,10 +1109,11 @@ export function analyzeDuplicates(
             targetFile: fileB,
             similarityScore: contentSim,
             isUncertain: true,
+            deletionEligible: false,
+            requiresManualReview: true,
             hasSignificantDivergence: true,
-            uncertaintyReason: decision.uncertaintyReason,
+            uncertaintyReason: decision.uncertaintyReason || 'Similarity and timestamps alone cannot justify trashing older drafts without an explicit content statement. Manual review required.',
           };
-          actionableMatches.push(uncertainMatch);
           uncertainMatches.push(uncertainMatch);
           pass2ResolvedIds.add(fileA.id);
           pass2ResolvedIds.add(fileB.id);
@@ -1121,25 +1124,22 @@ export function analyzeDuplicates(
           actionableMatches.push({
             id: `version-${decision.keeper.id}-${decision.olderOrDuplicate.id}`,
             type: 'near-duplicate',
-            confidence: decision.signalUsed === 'content_statement' ? 0.98 : Math.min(0.95, 0.7 + contentSim * 0.25),
+            confidence: 0.98,
             reason: textComparedReason,
-            signalUsed: decision.signalUsed,
+            signalUsed: 'content_statement',
             comparisonMethod: 'text_similarity',
             originalFile: decision.keeper,
             targetFile: decision.olderOrDuplicate,
             similarityScore: contentSim,
             isUncertain: false,
+            deletionEligible: true,
+            requiresManualReview: false,
           });
           break;
         }
       }
     }
   }
-
-  // Unique files: all files that were not trashed or targeted as older drafts
-  // (Note: 00_README.txt and protected key files are fully excluded and must not appear in uniqueFiles or reports)
-  const trashedTargetIds = new Set(actionableMatches.filter((m) => !m.isUncertain).map((m) => m.targetFile.id));
-  const uniqueFiles = sortedFiles.filter((f) => !trashedTargetIds.has(f.id));
 
   // Enrich each match with content divergence analysis
   const enrichWithDivergence = (m: DuplicateMatch): DuplicateMatch => {
@@ -1151,7 +1151,10 @@ export function analyzeDuplicates(
     //    must still resolve confidently when a document explicitly states it supersedes another,
     //    provided the 50% content gate is satisfied.
     const isProtectedByContentSignalOrExact =
-      m.type === 'exact' || (m.signalUsed === 'content_statement' && m.similarityScore >= 0.50);
+      m.type === 'exact' ||
+      m.type === 'byte-exact' ||
+      m.type === 'content-exact' ||
+      (m.signalUsed === 'content_statement' && m.similarityScore >= 0.50);
     const hasSignificantDivergence = isProtectedByContentSignalOrExact
       ? false
       : (m.isUncertain || divergence.hasSignificantDivergence);
@@ -1175,13 +1178,22 @@ export function analyzeDuplicates(
       summaryMessage = divergence.summaryMessage;
     }
 
-    const isDeletionEligible = m.deletionEligible !== undefined
-      ? m.deletionEligible
-      : (m.type === 'exact' || m.type === 'byte-exact' || m.type === 'content-exact' || (!hasSignificantDivergence && !m.isUncertain && m.type !== 'probable-candidate' && m.type !== 'requiresManualReview' && m.comparisonMethod !== 'size_and_name_match' && m.comparisonMethod !== 'none'));
+    const isDeletionEligible =
+      !m.isUncertain &&
+      !m.requiresManualReview &&
+      m.deletionEligible !== false &&
+      m.signalUsed !== 'none' &&
+      (m.type === 'exact' ||
+        m.type === 'byte-exact' ||
+        m.type === 'content-exact' ||
+        (m.signalUsed === 'content_statement' &&
+          !hasSignificantDivergence &&
+          m.type !== 'probable-candidate' &&
+          m.type !== 'requiresManualReview' &&
+          m.comparisonMethod !== 'size_and_name_match' &&
+          m.comparisonMethod !== 'none'));
 
-    const requiresManualReview = m.requiresManualReview !== undefined
-      ? m.requiresManualReview
-      : !isDeletionEligible;
+    const requiresManualReview = !isDeletionEligible;
 
     return {
       ...m,
@@ -1202,9 +1214,52 @@ export function analyzeDuplicates(
     };
   };
 
+  const enrichedActionable = actionableMatches.map(enrichWithDivergence);
+  const enrichedUncertain = uncertainMatches.map(enrichWithDivergence);
+
+  // Strictly partition: actionableMatches must ONLY contain deletion-eligible candidates.
+  // Any uncertain, manual review, divergent, or signalUsed === 'none' matches are routed to uncertainMatches.
+  const finalActionable: DuplicateMatch[] = [];
+  const finalUncertain: DuplicateMatch[] = [...enrichedUncertain];
+
+  for (const m of enrichedActionable) {
+    if (
+      m.deletionEligible &&
+      !m.isUncertain &&
+      !m.requiresManualReview &&
+      !m.hasSignificantDivergence &&
+      m.signalUsed !== 'none'
+    ) {
+      finalActionable.push(m);
+    } else {
+      finalUncertain.push({
+        ...m,
+        isUncertain: true,
+        requiresManualReview: true,
+        deletionEligible: false,
+      });
+    }
+  }
+
+  // Unique files: all files that were not trashed or targeted as older drafts or uncertain review files
+  // (Note: 00_README.txt and protected key files are fully excluded and must not appear in uniqueFiles or reports)
+  const trashedTargetIds = new Set(finalActionable.map((m) => m.targetFile.id));
+  const uncertainFileIds = new Set<string>();
+  for (const u of finalUncertain) {
+    if (u.targetFile?.id) uncertainFileIds.add(u.targetFile.id);
+  }
+  // Enforce mutual exclusivity
+  for (const id of uncertainFileIds) {
+    trashedTargetIds.delete(id);
+  }
+
+  const uniqueFiles = sortedFiles.filter(
+    (f) => !trashedTargetIds.has(f.id) && !uncertainFileIds.has(f.id) && !isProtectedKeyFile(f)
+  );
+
   return {
-    actionableMatches: actionableMatches.map(enrichWithDivergence),
-    uncertainMatches: uncertainMatches.map(enrichWithDivergence),
+    actionableMatches: finalActionable,
+    uncertainMatches: finalUncertain,
     uniqueFiles,
   };
 }

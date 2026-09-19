@@ -5,6 +5,7 @@ import {
   exportReportToCsv,
   exportReportToMarkdown,
   exportReportToPlainText,
+  generateMarkdownReport,
 } from './exportReport';
 import { CleanupReport } from '../types';
 
@@ -196,5 +197,135 @@ describe('exportReport - Report Generation & Formatting', () => {
     expect(() => exportReportToCsv(brokenReport)).not.toThrow();
     expect(() => exportReportToMarkdown(brokenReport)).not.toThrow();
     expect(() => exportReportToPlainText(brokenReport)).not.toThrow();
+  });
+
+  it('strictly reconciles counts and ensures mutual exclusivity across categories in Markdown report', () => {
+    // Simulate a case with 16 total files:
+    // e.g. 4 proposed for trash, 3 uncertain, 9 unique/kept -> 4 + 3 + 9 = 16
+    const reportWithPotentials: CleanupReport = {
+      timestamp: '2025-01-15T12:00:00.000Z',
+      folderName: 'TEST',
+      isProposedReport: true,
+      totalFilesReviewed: 16,
+      totalExactDuplicates: 4,
+      totalVersionDrafts: 0,
+      totalTrashed: 0,
+      totalUniqueKept: 9,
+      trashedFiles: [
+        {
+          trashedFile: {
+            id: 'f1',
+            name: '01_Doc_Copy.md',
+            mimeType: 'text/markdown',
+            size: 1000,
+            modifiedTime: '2025-01-01T10:00:00Z',
+          },
+          keptOriginalFile: {
+            id: 'f2',
+            name: '01_Doc.md',
+            mimeType: 'text/markdown',
+            size: 1000,
+            modifiedTime: '2025-01-02T10:00:00Z',
+          },
+          type: 'exact',
+          reason: 'Exact byte-identical file. SHA-256 verified.',
+          signalUsed: 'sha256_checksum',
+          similarity: 1.0,
+          isProposed: true,
+          trashedSuccess: false,
+        },
+      ],
+      uncertainFiles: [
+        {
+          fileA: {
+            id: 'f3',
+            name: '05_Client-Onboarding-Plain.txt',
+            mimeType: 'text/plain',
+            size: 1200,
+            modifiedTime: '2025-01-03T10:00:00Z',
+          },
+          fileB: {
+            id: 'f4',
+            name: '12_Client-Onboarding-Priya.md',
+            mimeType: 'text/markdown',
+            size: 1400,
+            modifiedTime: '2025-01-04T10:00:00Z',
+          },
+          reason: 'Client-specific divergence detected. Requires manual review.',
+          similarity: 0.72,
+          comparisonMethod: 'text_similarity',
+        },
+        {
+          fileA: {
+            id: 'f5',
+            name: '10_Weekly-Update-Company.md',
+            mimeType: 'text/markdown',
+            size: 2000,
+            modifiedTime: '2025-01-10T10:00:00Z',
+          },
+          fileB: {
+            id: 'f6',
+            name: '14_Weekly-Update-Marketing.md',
+            mimeType: 'text/markdown',
+            size: 1900,
+            modifiedTime: '2025-01-10T10:02:00Z',
+          },
+          reason: 'Marketing-specific metrics divergence. Signal used: None.',
+          similarity: 0.78,
+          comparisonMethod: 'text_similarity',
+        },
+      ],
+      keptFiles: [
+        {
+          id: 'f2', // The kept original
+          name: '01_Doc.md',
+          mimeType: 'text/markdown',
+          size: 1000,
+          modifiedTime: '2025-01-02T10:00:00Z',
+        },
+        {
+          id: 'f3',
+          name: '05_Client-Onboarding-Plain.txt',
+          mimeType: 'text/plain',
+          size: 1200,
+          modifiedTime: '2025-01-03T10:00:00Z',
+        },
+        {
+          id: 'f5',
+          name: '10_Weekly-Update-Company.md',
+          mimeType: 'text/markdown',
+          size: 2000,
+          modifiedTime: '2025-01-10T10:00:00Z',
+        },
+        {
+          id: 'f7',
+          name: 'Unique_Analysis.pdf',
+          mimeType: 'application/pdf',
+          size: 50000,
+          modifiedTime: '2025-01-12T10:00:00Z',
+        },
+      ],
+    };
+
+    const md = generateMarkdownReport(reportWithPotentials);
+
+    // 1. Check that uncertain files do NOT appear as [PROPOSED FOR TRASH]
+    expect(md).not.toContain('[PROPOSED FOR TRASH] 12_Client-Onboarding-Priya.md');
+    expect(md).not.toContain('[PROPOSED FOR TRASH] 05_Client-Onboarding-Plain.txt');
+    expect(md).not.toContain('[PROPOSED FOR TRASH] 14_Weekly-Update-Marketing.md');
+
+    // 2. Check that uncertain files appear under [KEPT SAFE]
+    expect(md).toContain('`[KEPT SAFE]` 12_Client-Onboarding-Priya.md');
+    expect(md).toContain('`[KEPT SAFE]` 14_Weekly-Update-Marketing.md');
+
+    // 3. Check mutual exclusivity: f4 and f6 must NOT appear in Retained Unique table
+    // because they are in the Uncertain section
+    const uniqueSectionStart = md.indexOf('Retained Unique & Primary Files');
+    const uniqueSection = md.slice(uniqueSectionStart);
+    expect(uniqueSection).not.toContain('12_Client-Onboarding-Priya.md');
+    expect(uniqueSection).not.toContain('14_Weekly-Update-Marketing.md');
+
+    // 4. Proposed trash file f1 must not appear in unique section
+    expect(uniqueSection).not.toContain('01_Doc_Copy.md');
   });
 });

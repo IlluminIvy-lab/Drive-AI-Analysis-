@@ -54,6 +54,88 @@ export const isProtectedKeyFile = (fileName?: string): boolean =>
   /^(?:00_)?readme\.txt$/i.test(fileName?.trim() || '');
 
 /**
+ * Returns a standardized, verified decision signal label.
+ */
+export function getDecisionSignalLabel(item: {
+  signalUsed?: string;
+  reason?: string;
+  type?: string;
+}): string {
+  if (item.signalUsed === 'canonical_export' || item.reason?.includes('canonical export text')) {
+    return 'Canonical Export Text (Verified)';
+  }
+  if (item.signalUsed === 'sha256_checksum' || item.reason?.includes('SHA-256 verified') || item.reason?.includes('SHA-256 checksum')) {
+    return 'SHA-256 Checksum (Verified)';
+  }
+  if (item.signalUsed === 'md5_checksum' || item.reason?.includes('MD5 checksum verified') || item.reason?.includes('MD5 checksum')) {
+    return 'MD5 Checksum (Verified)';
+  }
+  if (item.signalUsed === 'content_hash' || item.reason?.includes('canonical text content')) {
+    return 'Content Hash Match (Verified)';
+  }
+  if (item.signalUsed === 'content_statement' || item.reason?.includes('Signal used: Content statement')) {
+    return 'Explicit Content Statement';
+  }
+  if (item.signalUsed === 'none' || item.reason?.includes('Signal used: None')) {
+    return 'None (Uncertain)';
+  }
+  if (item.signalUsed === 'size_and_name' || item.signalUsed === 'filename_and_size') {
+    return 'File Size & Name Match';
+  }
+  if (item.signalUsed === 'modified_timestamp' || item.reason?.includes('Signal used: Modified timestamp')) {
+    return 'Modified Timestamp';
+  }
+  if (item.type === 'exact' || item.type === 'byte-exact' || item.type === 'content-exact') {
+    return 'Binary / Content Verified';
+  }
+  return 'None (Uncertain)';
+}
+
+/**
+ * Partitions report files into strictly mutually exclusive categories and reconciles totals.
+ */
+export function partitionReportFiles(report: CleanupReport) {
+  // 1. Files proposed for trash or trashed
+  const validTrashed = report.trashedFiles.filter(
+    (item) => !isProtectedKeyFile(item.trashedFile?.name)
+  );
+  const trashedFileIds = new Set(validTrashed.map((t) => t.trashedFile.id));
+
+  // 2. Uncertain files: strictly exclude any file that is already in validTrashed
+  const displayedUncertain: CleanupReport['uncertainFiles'] = [];
+  const uncertainFileIds = new Set<string>();
+  for (const u of report.uncertainFiles) {
+    const targetId = u.fileB?.id;
+    if (
+      targetId &&
+      !trashedFileIds.has(targetId) &&
+      !uncertainFileIds.has(targetId) &&
+      !isProtectedKeyFile(u.fileB?.name)
+    ) {
+      uncertainFileIds.add(targetId);
+      displayedUncertain.push(u);
+    }
+  }
+
+  // 3. Unique/latest kept files: strictly exclude any file in trashedFileIds or uncertainFileIds
+  const displayedKept = report.keptFiles.filter(
+    (f) =>
+      !isProtectedKeyFile(f?.name) &&
+      !trashedFileIds.has(f.id) &&
+      !uncertainFileIds.has(f.id)
+  );
+
+  const totalReviewed = validTrashed.length + displayedUncertain.length + displayedKept.length;
+
+  return {
+    validTrashed,
+    displayedUncertain,
+    displayedKept,
+    totalReviewed,
+  };
+}
+
+/**
  * Helper to trigger a browser file download.
  */
 export function downloadReportFile(content: string, filename: string, mimeType: string): void {
@@ -97,10 +179,8 @@ export function exportReportToCsv(report: CleanupReport): void {
   const lines: string[] = [];
   const seenFileIds = new Set<string>();
 
-  // Calculate actual counts excluding protected key files and deduplicated
-  const validTrashed = report.trashedFiles.filter(
-    (item) => !isProtectedKeyFile(item.trashedFile?.name)
-  );
+  const { validTrashed, displayedUncertain, displayedKept, totalReviewed } =
+    partitionReportFiles(report);
   const successfulTrashed = validTrashed.filter((item) => item.trashedSuccess);
   const failedTrashed = validTrashed.filter(
     (item) => !item.trashedSuccess && !item.isProposed && !report.isProposedReport
@@ -110,12 +190,12 @@ export function exportReportToCsv(report: CleanupReport): void {
   lines.push(`${escapeCsv(report.isProposedReport ? 'DRIVE CLEANUP AGENT - PROPOSED PLAN REPORT' : 'DRIVE CLEANUP AGENT - SUMMARY REPORT')}`);
   lines.push(`${escapeCsv('Folder Name')},${escapeCsv(report.folderName)}`);
   lines.push(`${escapeCsv('Report Timestamp')},${escapeCsv(report.timestamp)}`);
-  lines.push(`${escapeCsv('Total Files Reviewed')},${escapeCsv(report.totalFilesReviewed)}`);
+  lines.push(`${escapeCsv('Total Files Reviewed')},${escapeCsv(totalReviewed)}`);
 
   if (report.isProposedReport) {
     lines.push(`${escapeCsv('Total Proposed for Trash')},${escapeCsv(validTrashed.length)}`);
-    lines.push(`${escapeCsv('Exact Duplicates Proposed')},${escapeCsv(validTrashed.filter((m) => m.type === 'exact').length)}`);
-    lines.push(`${escapeCsv('Older Drafts Proposed')},${escapeCsv(validTrashed.filter((m) => m.type !== 'exact').length)}`);
+    lines.push(`${escapeCsv('Exact Duplicates Proposed')},${escapeCsv(validTrashed.filter((m) => m.type === 'exact' || m.type === 'byte-exact' || m.type === 'content-exact').length)}`);
+    lines.push(`${escapeCsv('Older Drafts Proposed')},${escapeCsv(validTrashed.filter((m) => m.type !== 'exact' && m.type !== 'byte-exact' && m.type !== 'content-exact').length)}`);
   } else {
     lines.push(`${escapeCsv('Total Trashed Files (Success)')},${escapeCsv(successfulTrashed.length)}`);
     if (failedTrashed.length > 0) {
@@ -125,8 +205,8 @@ export function exportReportToCsv(report: CleanupReport): void {
     lines.push(`${escapeCsv('Older Draft Versions Trashed')},${escapeCsv(report.totalVersionDrafts)}`);
   }
 
-  lines.push(`${escapeCsv('Flagged Uncertain (Kept)')},${escapeCsv(report.uncertainFiles.filter((u) => !isProtectedKeyFile(u.fileB?.name)).length)}`);
-  lines.push(`${escapeCsv('Unique / Latest Kept')},${escapeCsv(report.totalUniqueKept)}`);
+  lines.push(`${escapeCsv('Flagged Uncertain (Kept)')},${escapeCsv(displayedUncertain.length)}`);
+  lines.push(`${escapeCsv('Unique / Latest Kept')},${escapeCsv(displayedKept.length)}`);
 
   if (report.metrics) {
     lines.push(`${escapeCsv('Estimated Space Reclaimed')},${escapeCsv(formatBytes(report.metrics.totalBytesReclaimed))}`);
@@ -135,7 +215,7 @@ export function exportReportToCsv(report: CleanupReport): void {
     lines.push(`${escapeCsv('Scan Duration (ms)')},${escapeCsv(report.metrics.scanDurationMs)}`);
     lines.push(`${escapeCsv('Processing Speed')},${escapeCsv(report.metrics.scanSpeedFilesPerSec + ' files/sec')}`);
   }
-  lines.push(`${escapeCsv('Policy Enforcement')},${escapeCsv('Non-destructive Drive Trash; 30-day recovery; User-approved actions only; Session undo active')}`);
+  lines.push(`${escapeCsv('Policy Enforcement')},${escapeCsv('Non-destructive Drive Trash; 30-day recovery; User-approved actions only; Session undo active; Mutually exclusive categories')}`);
   lines.push(''); // Blank separator line
 
   // Detailed File Table Header
@@ -168,7 +248,7 @@ export function exportReportToCsv(report: CleanupReport): void {
     seenFileIds.add(file.id);
 
     const sizeBytes = getEstimatedFileSize(file);
-    const isExact = item.type === 'exact';
+    const isExact = item.type === 'exact' || item.type === 'byte-exact' || item.type === 'content-exact';
     const typeSuffix = isExact ? 'Exact Duplicate' : 'Older Draft Version';
 
     let category: string;
@@ -185,23 +265,7 @@ export function exportReportToCsv(report: CleanupReport): void {
       statusText = `Failed to Trash: ${item.error || 'Permission denied or file unavailable in Drive'}`;
     }
 
-    const signalLabel = item.signalUsed === 'canonical_export'
-      ? 'Canonical Export Text'
-      : item.signalUsed === 'content_hash'
-      ? 'Content Hash Match'
-      : item.signalUsed === 'content_statement'
-      ? 'Explicit Content Statement'
-      : item.signalUsed === 'sha256_checksum'
-      ? 'SHA-256 Checksum'
-      : item.signalUsed === 'md5_checksum'
-      ? 'MD5 Checksum'
-      : item.signalUsed === 'size_and_name' || item.signalUsed === 'filename_and_size'
-      ? 'File Size & Name Match'
-      : item.signalUsed === 'modified_timestamp'
-      ? 'Modified Timestamp'
-      : item.reason.includes('Signal used: Content statement')
-      ? 'Explicit Content Statement'
-      : 'Modified Timestamp';
+    const signalLabel = getDecisionSignalLabel(item);
 
     const similarityCell =
       item.comparisonMethod === 'size_and_name_match'
@@ -237,9 +301,9 @@ export function exportReportToCsv(report: CleanupReport): void {
   });
 
   // 2. Uncertain Files
-  report.uncertainFiles.forEach((item) => {
+  displayedUncertain.forEach((item) => {
     const targetFile = item.fileB;
-    if (!targetFile || !targetFile.id || seenFileIds.has(targetFile.id) || isProtectedKeyFile(targetFile.name)) {
+    if (!targetFile || !targetFile.id || seenFileIds.has(targetFile.id)) {
       return;
     }
     seenFileIds.add(targetFile.id);
@@ -261,7 +325,7 @@ export function exportReportToCsv(report: CleanupReport): void {
       escapeCsv(item.fileA?.name || 'N/A'),
       escapeCsv(item.fileA?.id || 'N/A'),
       escapeCsv(item.fileA ? safeFormatIsoDate(item.fileA.modifiedTime) : 'N/A'),
-      escapeCsv('None (Uncertain / Conflicting)'),
+      escapeCsv('None (Uncertain / Manual Review Required)'),
       escapeCsv(uncertainSimCell),
       escapeCsv(`Flagged: ${item.reason} - Kept in place without action per strict safety threshold`),
       escapeCsv('Active in Drive (Untouched)'),
@@ -271,8 +335,8 @@ export function exportReportToCsv(report: CleanupReport): void {
   });
 
   // 3. Kept / Unique Files
-  report.keptFiles.forEach((file) => {
-    if (!file || !file.id || seenFileIds.has(file.id) || isProtectedKeyFile(file.name)) {
+  displayedKept.forEach((file) => {
+    if (!file || !file.id || seenFileIds.has(file.id)) {
       return;
     }
     seenFileIds.add(file.id);
@@ -312,35 +376,31 @@ export function generateMarkdownReport(report: CleanupReport): string {
     ? 'Drive Cleanup Agent — Proposed Plan Report'
     : 'Drive Cleanup Agent — Cleanup Summary Report';
 
-  const validTrashed = report.trashedFiles.filter(
-    (item) => !isProtectedKeyFile(item.trashedFile?.name)
-  );
+  const { validTrashed, displayedUncertain, displayedKept, totalReviewed } =
+    partitionReportFiles(report);
   const successfulTrashed = validTrashed.filter((item) => item.trashedSuccess);
   const failedTrashed = validTrashed.filter(
     (item) => !item.trashedSuccess && !item.isProposed && !isProposed
   );
-  const displayedUncertain = report.uncertainFiles.filter(
-    (u) => !isProtectedKeyFile(u.fileB?.name)
-  );
-  const displayedKept = report.keptFiles.filter((f) => !isProtectedKeyFile(f?.name));
 
   let md = `# ${title}\n\n`;
   md += `> **Folder Scanned:** \`${report.folderName}\`  \n`;
   md += `> **Generated At:** ${safeFormatLocaleDate(report.timestamp)}  \n`;
   md += `> **Execution Mode:** ${isProposed ? 'Proposed Plan (Pre-Execution Audit)' : 'Executed (Moved to Drive Trash)'}  \n`;
   md += `> **Policy:** Non-destructive Google Drive Trash with 30-day recovery window.  \n`;
+  md += `> **Reconciliation:** All categories are mutually exclusive. Total files reviewed (${totalReviewed}) = Proposed/Trashed (${validTrashed.length}) + Flagged Uncertain (${displayedUncertain.length}) + Unique/Latest Kept (${displayedKept.length}).  \n`;
   md += `> **Plan Scope:** Proposed and executed cleanup plans apply strictly to trashing confirmed duplicate and older draft files. Rename and folder reorganization operations are separate individual interactive actions requiring explicit per-file user confirmation and are never executed automatically by AI suggestion.\n\n`;
 
   // 1. Executive Summary Table
   md += `## 1. Executive Summary\n\n`;
   md += `| Metric | Count / Value |\n`;
   md += `| :--- | :--- |\n`;
-  md += `| **Total Files Reviewed** | ${report.totalFilesReviewed} |\n`;
+  md += `| **Total Files Reviewed** | ${totalReviewed} |\n`;
 
   if (isProposed) {
     md += `| **Total Proposed for Trash** | ${validTrashed.length} |\n`;
-    md += `| **Exact Duplicates** | ${validTrashed.filter((m) => m.type === 'exact').length} |\n`;
-    md += `| **Older Draft Versions** | ${validTrashed.filter((m) => m.type !== 'exact').length} |\n`;
+    md += `| **Exact Duplicates** | ${validTrashed.filter((m) => m.type === 'exact' || m.type === 'byte-exact' || m.type === 'content-exact').length} |\n`;
+    md += `| **Older Draft Versions** | ${validTrashed.filter((m) => m.type !== 'exact' && m.type !== 'byte-exact' && m.type !== 'content-exact').length} |\n`;
   } else {
     md += `| **Total Trashed Files (Success)** | ${successfulTrashed.length} |\n`;
     if (failedTrashed.length > 0) {
@@ -375,7 +435,7 @@ export function generateMarkdownReport(report: CleanupReport): string {
   } else {
     validTrashed.forEach((item, index) => {
       const file = item.trashedFile;
-      const isExact = item.type === 'exact';
+      const isExact = item.type === 'exact' || item.type === 'byte-exact' || item.type === 'content-exact';
       const typeLabel = item.type === 'content-exact'
         ? 'Content-Exact Duplicate (Exported Text)'
         : item.type === 'byte-exact'
@@ -390,23 +450,7 @@ export function generateMarkdownReport(report: CleanupReport): string {
         ? 'TRASHED'
         : `FAILED: ${item.error || 'Permission Denied'}`;
 
-      const signalLabel = item.signalUsed === 'canonical_export'
-        ? 'Canonical Export Text'
-        : item.signalUsed === 'content_hash'
-        ? 'Content Hash Match'
-        : item.signalUsed === 'content_statement'
-        ? 'Explicit Content Statement'
-        : item.signalUsed === 'sha256_checksum'
-        ? 'SHA-256 Checksum'
-        : item.signalUsed === 'md5_checksum'
-        ? 'MD5 Checksum'
-        : item.signalUsed === 'size_and_name' || item.signalUsed === 'filename_and_size'
-        ? 'File Size & Name Match'
-        : item.signalUsed === 'modified_timestamp'
-        ? 'Modified Timestamp'
-        : item.reason.includes('Signal used: Content statement')
-        ? 'Explicit Content Statement'
-        : 'Modified Timestamp';
+      const signalLabel = getDecisionSignalLabel(item);
 
       const simLabel =
         item.comparisonMethod === 'size_and_name_match'
@@ -487,17 +531,12 @@ export function generatePlainTextReport(report: CleanupReport): string {
   const sep = '='.repeat(80);
   const subSep = '-'.repeat(80);
 
-  const validTrashed = report.trashedFiles.filter(
-    (item) => !isProtectedKeyFile(item.trashedFile?.name)
-  );
+  const { validTrashed, displayedUncertain, displayedKept, totalReviewed } =
+    partitionReportFiles(report);
   const successfulTrashed = validTrashed.filter((item) => item.trashedSuccess);
   const failedTrashed = validTrashed.filter(
     (item) => !item.trashedSuccess && !item.isProposed && !isProposed
   );
-  const displayedUncertain = report.uncertainFiles.filter(
-    (u) => !isProtectedKeyFile(u.fileB?.name)
-  );
-  const displayedKept = report.keptFiles.filter((f) => !isProtectedKeyFile(f?.name));
 
   let txt = `${sep}\n`;
   txt += `GOOGLE DRIVE CLEANUP AGENT - ${isProposed ? 'PROPOSED PLAN REPORT' : 'SUMMARY REPORT'}\n`;
@@ -506,6 +545,7 @@ export function generatePlainTextReport(report: CleanupReport): string {
   txt += `Report Timestamp:    ${safeFormatLocaleDate(report.timestamp)}\n`;
   txt += `Status:              ${isProposed ? 'PROPOSED AUDIT PLAN (Pending Confirmation)' : 'CLEANUP EXECUTED (Moved to Drive Trash)'}\n`;
   txt += `Policy Enforcement:  Non-destructive Drive Trash (30-day recovery), user-approved\n`;
+  txt += `Reconciliation:      Total (${totalReviewed}) = Proposed (${validTrashed.length}) + Uncertain (${displayedUncertain.length}) + Kept (${displayedKept.length})\n`;
   txt += `Plan Scope:          Proposed and executed cleanup plans apply strictly to trashing confirmed duplicate and older draft files. Rename and folder reorganization operations are separate individual interactive actions requiring explicit per-file user confirmation and are never executed automatically by AI suggestion.\n`;
   txt += `${sep}\n\n`;
 
@@ -513,12 +553,12 @@ export function generatePlainTextReport(report: CleanupReport): string {
   txt += `${subSep}\n`;
   txt += `1. EXECUTIVE SUMMARY & STATISTICS\n`;
   txt += `${subSep}\n`;
-  txt += `Total Files Reviewed:          ${report.totalFilesReviewed}\n`;
+  txt += `Total Files Reviewed:          ${totalReviewed}\n`;
 
   if (isProposed) {
     txt += `Total Proposed for Trash:      ${validTrashed.length}\n`;
-    txt += `  - Exact Duplicates:          ${validTrashed.filter((m) => m.type === 'exact').length}\n`;
-    txt += `  - Older Draft Versions:      ${validTrashed.filter((m) => m.type !== 'exact').length}\n`;
+    txt += `  - Exact Duplicates:          ${validTrashed.filter((m) => m.type === 'exact' || m.type === 'byte-exact' || m.type === 'content-exact').length}\n`;
+    txt += `  - Older Draft Versions:      ${validTrashed.filter((m) => m.type !== 'exact' && m.type !== 'byte-exact' && m.type !== 'content-exact').length}\n`;
   } else {
     txt += `Total Trashed Files (Success): ${successfulTrashed.length}\n`;
     if (failedTrashed.length > 0) {
@@ -558,7 +598,7 @@ export function generatePlainTextReport(report: CleanupReport): string {
   } else {
     validTrashed.forEach((item, index) => {
       const file = item.trashedFile;
-      const isExact = item.type === 'exact';
+      const isExact = item.type === 'exact' || item.type === 'byte-exact' || item.type === 'content-exact';
       const typeLabel = item.type === 'content-exact'
         ? 'Content-Exact Duplicate (Exported Text)'
         : item.type === 'byte-exact'
@@ -573,23 +613,7 @@ export function generatePlainTextReport(report: CleanupReport): string {
         ? 'TRASHED'
         : `FAILED: ${item.error || 'Permission Denied'}`;
 
-      const signalLabel = item.signalUsed === 'canonical_export'
-        ? 'Canonical Export Text'
-        : item.signalUsed === 'content_hash'
-        ? 'Content Hash Match'
-        : item.signalUsed === 'content_statement'
-        ? 'Explicit Content Statement'
-        : item.signalUsed === 'sha256_checksum'
-        ? 'SHA-256 Checksum'
-        : item.signalUsed === 'md5_checksum'
-        ? 'MD5 Checksum'
-        : item.signalUsed === 'size_and_name' || item.signalUsed === 'filename_and_size'
-        ? 'File Size & Name Match'
-        : item.signalUsed === 'modified_timestamp'
-        ? 'Modified Timestamp'
-        : item.reason.includes('Signal used: Content statement')
-        ? 'Explicit Content Statement'
-        : 'Modified Timestamp';
+      const signalLabel = getDecisionSignalLabel(item);
 
       const simLabel =
         item.comparisonMethod === 'size_and_name_match'
@@ -649,19 +673,26 @@ export function generatePlainTextReport(report: CleanupReport): string {
   if (displayedKept.length === 0) {
     txt += `(No unique files)\n\n`;
   } else {
-    displayedKept.forEach((f, idx) => {
-      txt += `${idx + 1}. "${f.name}" (${formatBytes(getEstimatedFileSize(f))}, Modified: ${safeFormatLocaleDate(f.modifiedTime)}, ID: ${f.id})\n`;
+    displayedKept.forEach((f, index) => {
+      txt += `[${index + 1}] ${f.name}\n`;
+      txt += `    - File ID:         ${f.id}\n`;
+      txt += `    - Modified Date:   ${safeFormatLocaleDate(f.modifiedTime)}\n`;
+      txt += `    - Size:            ${formatBytes(getEstimatedFileSize(f))}\n`;
+      txt += `    - MIME Type:       ${f.mimeType}\n\n`;
     });
-    txt += `\n`;
   }
 
-  // 6. Policies
+  // 6. Safety Policies
   txt += `${subSep}\n`;
-  txt += `6. SAFETY PROTOCOLS & RECOVERY GUARANTEES\n`;
+  txt += `6. SAFETY & COMPLIANCE POLICIES\n`;
   txt += `${subSep}\n`;
-  txt += `- All trashed files are placed in Google Drive Trash with a 30-day recovery window.\n`;
-  txt += `- In-session undo allows immediate restoration within active time window.\n`;
-  txt += `- Content statements indicating "final draft" or "supersedes" take precedence over modification timestamps.\n`;
+  txt += `- Non-destructive Drive Trash with 30-day recovery window.\n`;
+  txt += `- Session undo active for all executed operations.\n`;
+  txt += `- Content-first precedence: Explicit version statements override timestamps.\n`;
+  txt += `- Zero unconfirmed actions.\n\n`;
+
+  txt += `${sep}\n`;
+  txt += `END OF REPORT\n`;
   txt += `${sep}\n`;
 
   return txt;
