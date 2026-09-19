@@ -188,14 +188,14 @@ export interface AutoSelectPreferences {
 }
 
 export const DEFAULT_AUTO_SELECT_PREFERENCES: AutoSelectPreferences = {
-  enabled: true,
+  enabled: false,
   keeperPreference: 'newer',
   secondaryPreference: 'largest',
   respectContentSignals: true,
-  autoSelectExact: true,
-  autoSelectDrafts: true,
+  autoSelectExact: false,
+  autoSelectDrafts: false,
   autoSelectDivergent: false,
   minSimilarityThreshold: 0.75,
   autoSelectUncertain: false,
-  autoApplyOnScan: true,
+  autoApplyOnScan: false,
 };

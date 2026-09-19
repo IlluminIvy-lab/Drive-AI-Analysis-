@@ -568,14 +568,11 @@ export default function App() {
       setScanMetrics(computed);
 
       // SMART SCAN (WITH REVIEW) WORKFLOW:
-      // Pre-select according to user-defined Auto-Select preferences (or empty if disabled):
-      const initialSelectedIds = autoSelectPreferences.enabled
-        ? autoSelectPreferences.autoApplyOnScan
+      // Pre-select according to user-defined Auto-Select preferences (or empty if disabled/not auto-applied):
+      const initialSelectedIds =
+        autoSelectPreferences.enabled && autoSelectPreferences.autoApplyOnScan
           ? evaluateAutoSelectMatchIds(analysis.actionableMatches, autoSelectPreferences)
-          : analysis.actionableMatches
-              .filter((m) => !m.hasSignificantDivergence)
-              .map((m) => m.id)
-        : [];
+          : [];
       setSelectedMatchIds(initialSelectedIds);
       setScanStage('smart_review');
       setIsScanSummaryOpen(true);
@@ -958,7 +955,7 @@ export default function App() {
     setKeptMatchIds([]);
     // Restore safe default selection
     const safeIds = actionableMatches
-      .filter((m) => !m.hasSignificantDivergence)
+      .filter((m) => isMatchSelectable(m) && !m.hasSignificantDivergence)
       .map((m) => m.id);
     setSelectedMatchIds(safeIds);
   };
@@ -1045,7 +1042,7 @@ export default function App() {
       } else if (action.type === 'keep_all') {
         setKeptMatchIds([]);
         const safeIds = actionableMatches
-          .filter((m) => !m.hasSignificantDivergence)
+          .filter((m) => isMatchSelectable(m) && !m.hasSignificantDivergence)
           .map((m) => m.id);
         setSelectedMatchIds(safeIds);
       }
@@ -1528,7 +1525,7 @@ export default function App() {
         }}
         onSelectExactOnlyAndReview={() => {
           const exactIds = actionableMatches
-            .filter((m) => m.type === 'exact')
+            .filter((m) => m.type === 'exact' && isMatchSelectable(m))
             .map((m) => m.id);
           setSelectedMatchIds(exactIds);
           setIsScanSummaryOpen(false);
@@ -1604,7 +1601,7 @@ export default function App() {
         currentFolder={targetFolder}
         matchesCount={actionableMatches.length}
         selectedMatchesCount={selectedMatchIds.length}
-        onSelectAllMatches={() => setSelectedMatchIds(actionableMatches.map((m) => m.id))}
+        onSelectAllMatches={() => setSelectedMatchIds(actionableMatches.filter(isMatchSelectable).map((m) => m.id))}
         onDeselectAllMatches={() => setSelectedMatchIds([])}
         onExportReport={actionableMatches.length > 0 ? handleExportProposedReport : undefined}
         onExportCsv={actionableMatches.length > 0 ? () => handleExportProposedReport('csv') : undefined}

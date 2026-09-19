@@ -8,7 +8,7 @@ import {
   isMatchSelectable,
 } from './cleanupActionGate';
 import { evaluateAutoSelectMatchIds } from './autoSelectUtils';
-import { DriveFileItem, DuplicateMatch } from '../types';
+import { DriveFileItem, DuplicateMatch, DEFAULT_AUTO_SELECT_PREFERENCES } from '../types';
 
 describe('cleanupActionGate - Strict Safety & Deletion Validation', () => {
   const mockBaseFile: DriveFileItem = {
@@ -299,5 +299,21 @@ describe('cleanupActionGate - Strict Safety & Deletion Validation', () => {
       targetFile: { ...mockTargetFile, contentStatus: 'error' },
     };
     expect(() => assertCanTrash(unreadableMatch, true)).toThrow(/unreadable or contains read errors/i);
+  });
+
+  it('verifies DEFAULT_AUTO_SELECT_PREFERENCES are review-only with all automatic actions disabled', () => {
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.enabled).toBe(false);
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.autoSelectExact).toBe(false);
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.autoSelectDrafts).toBe(false);
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.autoSelectDivergent).toBe(false);
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.autoSelectUncertain).toBe(false);
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.autoApplyOnScan).toBe(false);
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.keeperPreference).toBe('newer');
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.secondaryPreference).toBe('largest');
+    expect(DEFAULT_AUTO_SELECT_PREFERENCES.respectContentSignals).toBe(true);
+
+    // With defaults, auto-select returns strictly empty list (review-only)
+    const selected = evaluateAutoSelectMatchIds([validMatch], DEFAULT_AUTO_SELECT_PREFERENCES);
+    expect(selected).toHaveLength(0);
   });
 });
